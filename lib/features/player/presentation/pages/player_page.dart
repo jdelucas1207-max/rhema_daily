@@ -3,10 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/player_providers.dart';
 
-/// Phase 1 entry page for the Rhema Daily player feature.
-///
-/// This is intentionally simple. It proves the architecture is wired up
-/// without introducing fake data or premature feature behavior.
+/// Displays locally stored Bible verses for the Rhema Daily player feature.
 class PlayerPage extends ConsumerStatefulWidget {
   const PlayerPage({super.key});
 
@@ -18,6 +15,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   @override
   void initState() {
     super.initState();
+
     Future.microtask(
       () => ref.read(playerStateNotifierProvider.notifier).loadVerses(),
     );
@@ -31,44 +29,74 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       appBar: AppBar(
         title: const Text('Rhema Daily'),
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Builder(
-          builder: (context) {
-            if (state.isLoading) {
-              return const Center(
-                child: CircularProgressIndicator(),
-              );
-            }
+      body: Builder(
+        builder: (context) {
+          if (state.isLoading) {
+            return const Center(
+              child: CircularProgressIndicator(),
+            );
+          }
 
-            if (state.errorMessage != null) {
-              return Center(
-                child: Text(state.errorMessage!),
-              );
-            }
-
-            if (state.verses.isEmpty) {
-              return const Center(
+          if (state.errorMessage != null) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
                 child: Text(
-                  'Rhema Daily foundation is ready.\nNo verses are stored locally yet.',
+                  state.errorMessage!,
                   textAlign: TextAlign.center,
                 ),
-              );
-            }
-
-            return ListView.builder(
-              itemCount: state.verses.length,
-              itemBuilder: (context, index) {
-                final verse = state.verses[index];
-
-                return ListTile(
-                  title: Text('${verse.book} ${verse.chapter}:${verse.verse}'),
-                  subtitle: Text(verse.translation),
-                );
-              },
+              ),
             );
-          },
-        ),
+          }
+
+          if (state.verses.isEmpty) {
+            return const Center(
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                  'No verses are stored locally yet.',
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            );
+          }
+
+          return ListView.separated(
+            padding: const EdgeInsets.all(16),
+            itemCount: state.verses.length,
+            separatorBuilder: (context, index) =>
+                const SizedBox(height: 12),
+            itemBuilder: (context, index) {
+              final verse = state.verses[index];
+
+              return Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        verse.book,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${verse.chapter}:${verse.verse} · '
+                        '${verse.translation}',
+                        style: Theme.of(context).textTheme.labelLarge,
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        verse.verseText,
+                        style: Theme.of(context).textTheme.bodyLarge,
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
       ),
     );
   }
