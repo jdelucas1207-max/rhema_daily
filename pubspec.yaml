@@ -28,7 +28,9 @@ dependencies:
   dartz: ^0.10.1
 
   # Audio Foundation
-  just_audio: ^0.9.46
+  just_audio: 0.9.46
+  audio_service: 0.18.18
+  audio_session: 0.1.25
 
 dev_dependencies:
   flutter_test:

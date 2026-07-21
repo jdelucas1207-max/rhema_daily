@@ -1,3 +1,4 @@
+import 'package:audio_service/audio_service.dart';
 import 'package:get_it/get_it.dart';
 
 import 'features/player/data/datasources/verse_local_datasource.dart';
@@ -15,8 +16,21 @@ Future<void> init() async {
   final databaseService = DatabaseService();
   await databaseService.init();
 
+  final audioHandler = await AudioService.init<RhemaAudioHandler>(
+    builder: RhemaAudioHandler.new,
+    config: const AudioServiceConfig(
+      androidNotificationChannelId:
+          'com.example.rhema_daily.channel.audio',
+      androidNotificationChannelName: 'Rhema Daily playback',
+      androidNotificationChannelDescription:
+          'Background playback controls for Rhema Daily verses.',
+      androidNotificationOngoing: false,
+      androidStopForegroundOnPause: false,
+    ),
+  );
+
   sl.registerLazySingleton<DatabaseService>(() => databaseService);
-  sl.registerLazySingleton<RhemaAudioHandler>(() => RhemaAudioHandler());
+  sl.registerLazySingleton<RhemaAudioHandler>(() => audioHandler);
 
   sl.registerLazySingleton<VerseLocalDataSource>(
     () => VerseLocalDataSourceImpl(

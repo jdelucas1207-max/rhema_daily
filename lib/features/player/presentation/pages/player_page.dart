@@ -105,8 +105,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                               Text(
                                 '${verse.chapter}:${verse.verse} · '
                                 '${verse.translation}',
-                                style:
-                                    Theme.of(context).textTheme.labelLarge,
+                                style: Theme.of(context).textTheme.labelLarge,
                               ),
                               const SizedBox(height: 12),
                               Text(
@@ -123,15 +122,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
               ),
               _PlaybackControls(
                 state: state,
-                onPlay: () async {
-                  await notifier.play();
-                },
-                onPause: () async {
-                  await notifier.pause();
-                },
-                onStop: () async {
-                  await notifier.stop();
-                },
+                onPlay: notifier.play,
+                onPause: notifier.pause,
+                onStop: notifier.stop,
+                onSeek: notifier.seek,
               ),
             ],
           );
@@ -146,22 +140,26 @@ class _PlaybackControls extends StatelessWidget {
   final Future<void> Function() onPlay;
   final Future<void> Function() onPause;
   final Future<void> Function() onStop;
+  final Future<void> Function(Duration position) onSeek;
 
   const _PlaybackControls({
     required this.state,
     required this.onPlay,
     required this.onPause,
     required this.onStop,
+    required this.onSeek,
   });
 
   @override
   Widget build(BuildContext context) {
     final selectedVerse = state.selectedVerse;
-    final isPreparing =
-        state.playbackStatus == VersePlaybackStatus.preparing;
+    final hasAudioPath = selectedVerse?.audioPath?.trim().isNotEmpty ?? false;
+
+    final isPreparing = state.playbackStatus == VersePlaybackStatus.preparing;
     final isPlaying = state.playbackStatus == VersePlaybackStatus.playing;
 
     final canPlay = selectedVerse != null &&
+        hasAudioPath &&
         !isPreparing &&
         !isPlaying &&
         state.playbackError == null;
@@ -172,7 +170,19 @@ class _PlaybackControls extends StatelessWidget {
         (isPreparing ||
             isPlaying ||
             state.playbackStatus == VersePlaybackStatus.paused ||
-            state.playbackStatus == VersePlaybackStatus.ready);
+            state.playbackStatus == VersePlaybackStatus.ready ||
+            state.playbackStatus == VersePlaybackStatus.completed);
+
+    final canSeek =
+        selectedVerse != null && hasAudioPath && state.duration > Duration.zero;
+
+    final maximumMilliseconds = state.duration.inMilliseconds.toDouble();
+
+    final sliderValue = canSeek
+        ? state.position.inMilliseconds
+            .clamp(0, state.duration.inMilliseconds)
+            .toDouble()
+        : 0.0;
 
     return SafeArea(
       top: false,
@@ -231,13 +241,38 @@ class _PlaybackControls extends StatelessWidget {
                   ),
               ],
               const SizedBox(height: 8),
+              Slider(
+                value: sliderValue,
+                min: 0,
+                max: canSeek ? maximumMilliseconds : 1,
+                onChanged: canSeek
+                    ? (value) {
+                        onSeek(
+                          Duration(milliseconds: value.round()),
+                        );
+                      }
+                    : null,
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(_formatDuration(state.position)),
+                    Text(_formatDuration(state.duration)),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 4),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   IconButton(
-                    tooltip: 'Play',
+                    tooltip: state.isCompleted ? 'Replay' : 'Play',
                     onPressed: canPlay ? onPlay : null,
-                    icon: const Icon(Icons.play_arrow),
+                    icon: Icon(
+                      state.isCompleted ? Icons.replay : Icons.play_arrow,
+                    ),
                   ),
                   IconButton(
                     tooltip: 'Pause',
@@ -258,6 +293,23 @@ class _PlaybackControls extends StatelessWidget {
     );
   }
 
+  static String _formatDuration(Duration duration) {
+    final safeDuration = duration < Duration.zero ? Duration.zero : duration;
+
+    final hours = safeDuration.inHours;
+    final minutes = safeDuration.inMinutes.remainder(60);
+    final seconds = safeDuration.inSeconds.remainder(60);
+
+    if (hours > 0) {
+      return '$hours:'
+          '${minutes.toString().padLeft(2, '0')}:'
+          '${seconds.toString().padLeft(2, '0')}';
+    }
+
+    return '${safeDuration.inMinutes}:'
+        '${seconds.toString().padLeft(2, '0')}';
+  }
+
   static String _statusLabel(VersePlaybackStatus status) {
     switch (status) {
       case VersePlaybackStatus.idle:
@@ -272,6 +324,8 @@ class _PlaybackControls extends StatelessWidget {
         return 'Paused.';
       case VersePlaybackStatus.stopped:
         return 'Stopped.';
+      case VersePlaybackStatus.completed:
+        return 'Playback completed.';
       case VersePlaybackStatus.error:
         return 'Playback unavailable.';
     }

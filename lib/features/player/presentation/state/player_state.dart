@@ -9,10 +9,11 @@ enum VersePlaybackStatus {
   playing,
   paused,
   stopped,
+  completed,
   error,
 }
 
-/// Presentation state for verse loading and basic audio playback.
+/// Presentation state for verse loading and audio playback.
 class PlayerState extends Equatable {
   final List<Verse> verses;
   final Verse? selectedVerse;
@@ -20,6 +21,9 @@ class PlayerState extends Equatable {
   final String? errorMessage;
   final VersePlaybackStatus playbackStatus;
   final String? playbackError;
+  final Duration position;
+  final Duration duration;
+  final Duration bufferedPosition;
 
   const PlayerState({
     required this.verses,
@@ -28,6 +32,9 @@ class PlayerState extends Equatable {
     required this.errorMessage,
     required this.playbackStatus,
     required this.playbackError,
+    required this.position,
+    required this.duration,
+    required this.bufferedPosition,
   });
 
   const PlayerState.initial()
@@ -36,7 +43,14 @@ class PlayerState extends Equatable {
         isLoading = false,
         errorMessage = null,
         playbackStatus = VersePlaybackStatus.idle,
-        playbackError = null;
+        playbackError = null,
+        position = Duration.zero,
+        duration = Duration.zero,
+        bufferedPosition = Duration.zero;
+
+  bool get isCompleted => playbackStatus == VersePlaybackStatus.completed;
+
+  bool get hasSeekableDuration => duration > Duration.zero;
 
   PlayerState copyWith({
     List<Verse>? verses,
@@ -45,6 +59,9 @@ class PlayerState extends Equatable {
     String? errorMessage,
     VersePlaybackStatus? playbackStatus,
     String? playbackError,
+    Duration? position,
+    Duration? duration,
+    Duration? bufferedPosition,
     bool clearErrorMessage = false,
     bool clearPlaybackError = false,
   }) {
@@ -57,6 +74,9 @@ class PlayerState extends Equatable {
       playbackStatus: playbackStatus ?? this.playbackStatus,
       playbackError:
           clearPlaybackError ? null : playbackError ?? this.playbackError,
+      position: position ?? this.position,
+      duration: duration ?? this.duration,
+      bufferedPosition: bufferedPosition ?? this.bufferedPosition,
     );
   }
 
@@ -68,5 +88,8 @@ class PlayerState extends Equatable {
         errorMessage,
         playbackStatus,
         playbackError,
+        position,
+        duration,
+        bufferedPosition,
       ];
 }

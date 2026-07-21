@@ -1,18 +1,89 @@
 import 'dart:async';
 
+import 'package:audio_service/audio_service.dart';
+import 'package:audio_session/audio_session.dart';
 import 'package:just_audio/just_audio.dart';
 
 /// App-owned audio service for verse playback.
 ///
-/// Presentation code must not communicate with [AudioPlayer] directly.
-class RhemaAudioHandler {
-  final AudioPlayer _audioPlayer = AudioPlayer();
+/// This handler is the single owner of [AudioPlayer]. Presentation code must
+/// communicate with this class rather than with [AudioPlayer] directly.
+class RhemaAudioHandler extends BaseAudioHandler {
+  final AudioPlayer _audioPlayer = AudioPlayer(
+    handleInterruptions: false,
+  );
+
+  final List<StreamSubscription<dynamic>> _subscriptions = [];
+
+  late final Future<void> _audioSessionInitialization;
+
+  bool _resumeAfterInterruption = false;
+  bool _isDucked = false;
+  bool _disposed = false;
+
+  RhemaAudioHandler() {
+    _audioSessionInitialization = _initializeAudioSession();
+    _initializePlayerSubscriptions();
+    _broadcastPlaybackState();
+  }
+
+  Stream<Duration> get positionStream => _audioPlayer.positionStream;
+
+  Stream<Duration?> get durationStream => _audioPlayer.durationStream;
+
+  Stream<Duration> get bufferedPositionStream =>
+      _audioPlayer.bufferedPositionStream;
+
+  Stream<bool> get completionStream => _audioPlayer.playerStateStream
+      .map(
+        (playerState) =>
+            playerState.processingState == ProcessingState.completed,
+      )
+      .distinct();
+
+  Duration get position => _audioPlayer.position;
+
+  Duration? get duration => _audioPlayer.duration;
+
+  Duration get bufferedPosition => _audioPlayer.bufferedPosition;
+
+  /// Publishes the selected verse to the operating system media session.
+  ///
+  /// No artwork or queue information is introduced.
+  Future<void> publishVerse({
+    required String verseId,
+    required String reference,
+    required String translation,
+  }) async {
+    final normalizedId = verseId.trim();
+    final normalizedReference = reference.trim();
+    final normalizedTranslation = translation.trim();
+
+    if (normalizedId.isEmpty || normalizedReference.isEmpty) {
+      throw const FormatException(
+        'The selected verse does not contain valid media metadata.',
+      );
+    }
+
+    mediaItem.add(
+      MediaItem(
+        id: normalizedId,
+        title: normalizedReference,
+        album: normalizedTranslation,
+        extras: <String, dynamic>{
+          'translation': normalizedTranslation,
+        },
+      ),
+    );
+  }
 
   /// Prepares an audio source for playback.
   ///
   /// HTTP and HTTPS values are treated as remote URLs. All other values are
   /// treated as local file paths.
-  Future<void> prepare(String audioPath) async {
+  Future<void> prepareSource(String audioPath) async {
+    await _audioSessionInitialization;
+
     final normalizedPath = audioPath.trim();
 
     if (normalizedPath.isEmpty) {
@@ -28,34 +99,285 @@ class RhemaAudioHandler {
 
     if (scheme == 'http' || scheme == 'https') {
       await _audioPlayer.setUrl(normalizedPath);
-      return;
-    }
-
-    if (scheme == 'file' && uri != null) {
+    } else if (scheme == 'file' && uri != null) {
       await _audioPlayer.setFilePath(uri.toFilePath());
-      return;
+    } else {
+      await _audioPlayer.setFilePath(normalizedPath);
     }
 
-    await _audioPlayer.setFilePath(normalizedPath);
+    _updatePublishedDuration();
+    _broadcastPlaybackState();
   }
 
-  /// Starts or resumes the prepared audio source.
-  ///
-  /// The returned playback future is intentionally not awaited because
-  /// just_audio keeps it active until playback pauses, stops, or completes.
-  void play() {
+  /// Handles play commands from both the app UI and the system media session.
+  @override
+  Future<void> play() async {
+    await _audioSessionInitialization;
+
+    if (_audioPlayer.processingState == ProcessingState.completed) {
+      await _audioPlayer.seek(Duration.zero);
+    }
+
     unawaited(_audioPlayer.play());
   }
 
+  /// Handles pause commands from both the app UI and system media controls.
+  @override
   Future<void> pause() async {
     await _audioPlayer.pause();
   }
 
+  /// Handles stop commands from both the app UI and system media controls.
+  @override
   Future<void> stop() async {
+    _resumeAfterInterruption = false;
+
     await _audioPlayer.stop();
+    await _audioPlayer.seek(Duration.zero);
+
+    _broadcastPlaybackState();
+  }
+
+  /// Handles seek commands from both the app UI and system media controls.
+  @override
+  Future<void> seek(Duration requestedPosition) async {
+    final loadedDuration = _audioPlayer.duration;
+
+    if (loadedDuration == null || loadedDuration <= Duration.zero) {
+      return;
+    }
+
+    var targetPosition = requestedPosition;
+
+    if (targetPosition < Duration.zero) {
+      targetPosition = Duration.zero;
+    } else if (targetPosition > loadedDuration) {
+      targetPosition = loadedDuration;
+    }
+
+    await _audioPlayer.seek(targetPosition);
+    _broadcastPlaybackState();
+  }
+
+  Future<void> _initializeAudioSession() async {
+    final session = await AudioSession.instance;
+
+    await session.configure(
+      AudioSessionConfiguration.speech(),
+    );
+
+    _subscriptions.add(
+      session.interruptionEventStream.listen(
+        _handleInterruption,
+      ),
+    );
+
+    _subscriptions.add(
+      session.becomingNoisyEventStream.listen(
+        (_) => _handleBecomingNoisy(),
+      ),
+    );
+  }
+
+  void _initializePlayerSubscriptions() {
+    _subscriptions.add(
+      _audioPlayer.playerStateStream.listen(
+        (_) => _broadcastPlaybackState(),
+      ),
+    );
+
+    _subscriptions.add(
+      _audioPlayer.bufferedPositionStream.listen(
+        (_) => _broadcastPlaybackState(),
+      ),
+    );
+
+    _subscriptions.add(
+      _audioPlayer.durationStream.listen(
+        (_) {
+          _updatePublishedDuration();
+          _broadcastPlaybackState();
+        },
+      ),
+    );
+  }
+
+  Future<void> _handleInterruption(
+    AudioInterruptionEvent event,
+  ) async {
+    if (event.begin) {
+      switch (event.type) {
+        case AudioInterruptionType.duck:
+          if (_audioPlayer.playing) {
+            _isDucked = true;
+            await _audioPlayer.setVolume(0.5);
+          }
+
+        case AudioInterruptionType.pause:
+          _resumeAfterInterruption = _audioPlayer.playing;
+
+          if (_audioPlayer.playing) {
+            await pause();
+          }
+
+        case AudioInterruptionType.unknown:
+          _resumeAfterInterruption = false;
+
+          if (_audioPlayer.playing) {
+            await pause();
+          }
+      }
+
+      return;
+    }
+
+    switch (event.type) {
+      case AudioInterruptionType.duck:
+        if (_isDucked) {
+          _isDucked = false;
+          await _audioPlayer.setVolume(1.0);
+        }
+
+      case AudioInterruptionType.pause:
+        final shouldResume = _resumeAfterInterruption;
+        _resumeAfterInterruption = false;
+
+        if (shouldResume) {
+          await play();
+        }
+
+      case AudioInterruptionType.unknown:
+        _resumeAfterInterruption = false;
+    }
+  }
+
+  Future<void> _handleBecomingNoisy() async {
+    _resumeAfterInterruption = false;
+
+    if (_audioPlayer.playing) {
+      await pause();
+    }
+  }
+
+  void _updatePublishedDuration() {
+    final currentItem = mediaItem.value;
+
+    if (currentItem == null) {
+      return;
+    }
+
+    final loadedDuration = _audioPlayer.duration;
+
+    if (currentItem.duration == loadedDuration) {
+      return;
+    }
+
+    mediaItem.add(
+      currentItem.copyWith(
+        duration: loadedDuration,
+      ),
+    );
+  }
+
+  void _broadcastPlaybackState() {
+    if (_disposed) {
+      return;
+    }
+
+    final isPlaying = _audioPlayer.playing;
+
+    final nextState = PlaybackState(
+      controls: <MediaControl>[
+        if (isPlaying) MediaControl.pause else MediaControl.play,
+        MediaControl.stop,
+      ],
+      systemActions: const <MediaAction>{
+        MediaAction.seek,
+      },
+      androidCompactActionIndices: const <int>[0, 1],
+      processingState: _mapProcessingState(
+        _audioPlayer.processingState,
+      ),
+      playing: isPlaying,
+      updatePosition: _audioPlayer.position,
+      bufferedPosition: _audioPlayer.bufferedPosition,
+      speed: _audioPlayer.speed,
+    );
+
+    final currentState = playbackState.value;
+
+    if (_playbackStatesMatch(currentState, nextState)) {
+      return;
+    }
+
+    playbackState.add(nextState);
+  }
+
+  AudioProcessingState _mapProcessingState(
+    ProcessingState processingState,
+  ) {
+    switch (processingState) {
+      case ProcessingState.idle:
+        return AudioProcessingState.idle;
+      case ProcessingState.loading:
+        return AudioProcessingState.loading;
+      case ProcessingState.buffering:
+        return AudioProcessingState.buffering;
+      case ProcessingState.ready:
+        return AudioProcessingState.ready;
+      case ProcessingState.completed:
+        return AudioProcessingState.completed;
+    }
+  }
+
+  bool _playbackStatesMatch(
+    PlaybackState current,
+    PlaybackState next,
+  ) {
+    return current.playing == next.playing &&
+        current.processingState == next.processingState &&
+        current.updatePosition == next.updatePosition &&
+        current.bufferedPosition == next.bufferedPosition &&
+        current.speed == next.speed &&
+        _listEquals(current.controls, next.controls) &&
+        _setEquals(current.systemActions, next.systemActions);
+  }
+
+  bool _listEquals<T>(List<T> first, List<T> second) {
+    if (identical(first, second)) {
+      return true;
+    }
+
+    if (first.length != second.length) {
+      return false;
+    }
+
+    for (var index = 0; index < first.length; index++) {
+      if (first[index] != second[index]) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  bool _setEquals<T>(Set<T> first, Set<T> second) {
+    return first.length == second.length && first.containsAll(second);
   }
 
   Future<void> dispose() async {
+    if (_disposed) {
+      return;
+    }
+
+    _disposed = true;
+
+    for (final subscription in _subscriptions) {
+      await subscription.cancel();
+    }
+
+    _subscriptions.clear();
+
     await _audioPlayer.dispose();
   }
 }
