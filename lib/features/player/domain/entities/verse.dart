@@ -1,6 +1,5 @@
 import 'package:equatable/equatable.dart';
 
-/// Core business entity for a Bible verse in Rhema Daily.
 class Verse extends Equatable {
   final String id;
   final String book;
@@ -23,6 +22,30 @@ class Verse extends Equatable {
     required this.durationInSeconds,
     required this.createdAt,
   });
+
+  Verse copyWith({
+    String? id,
+    String? book,
+    int? chapter,
+    int? verse,
+    String? translation,
+    String? verseText,
+    String? audioPath,
+    int? durationInSeconds,
+    DateTime? createdAt,
+  }) {
+    return Verse(
+      id: id ?? this.id,
+      book: book ?? this.book,
+      chapter: chapter ?? this.chapter,
+      verse: verse ?? this.verse,
+      translation: translation ?? this.translation,
+      verseText: verseText ?? this.verseText,
+      audioPath: audioPath ?? this.audioPath,
+      durationInSeconds: durationInSeconds ?? this.durationInSeconds,
+      createdAt: createdAt ?? this.createdAt,
+    );
+  }
 
   @override
   List<Object?> get props => [

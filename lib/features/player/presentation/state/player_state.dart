@@ -13,10 +13,12 @@ enum VersePlaybackStatus {
   error,
 }
 
-/// Presentation state for verse loading and audio playback.
+/// Presentation state for verse loading, queue navigation, and audio playback.
 class PlayerState extends Equatable {
   final List<Verse> verses;
+  final List<Verse> queue;
   final Verse? selectedVerse;
+  final int? currentQueueIndex;
   final bool isLoading;
   final String? errorMessage;
   final VersePlaybackStatus playbackStatus;
@@ -27,7 +29,9 @@ class PlayerState extends Equatable {
 
   const PlayerState({
     required this.verses,
+    required this.queue,
     required this.selectedVerse,
+    required this.currentQueueIndex,
     required this.isLoading,
     required this.errorMessage,
     required this.playbackStatus,
@@ -39,7 +43,9 @@ class PlayerState extends Equatable {
 
   const PlayerState.initial()
       : verses = const [],
+        queue = const [],
         selectedVerse = null,
+        currentQueueIndex = null,
         isLoading = false,
         errorMessage = null,
         playbackStatus = VersePlaybackStatus.idle,
@@ -52,9 +58,34 @@ class PlayerState extends Equatable {
 
   bool get hasSeekableDuration => duration > Duration.zero;
 
+  bool get hasPrevious {
+    final index = currentQueueIndex;
+    return index != null && index > 0 && index < queue.length;
+  }
+
+  bool get hasNext {
+    final index = currentQueueIndex;
+
+    return index != null &&
+        index >= 0 &&
+        index < queue.length - 1;
+  }
+
+  Verse? get currentQueueItem {
+    final index = currentQueueIndex;
+
+    if (index == null || index < 0 || index >= queue.length) {
+      return null;
+    }
+
+    return queue[index];
+  }
+
   PlayerState copyWith({
     List<Verse>? verses,
+    List<Verse>? queue,
     Verse? selectedVerse,
+    int? currentQueueIndex,
     bool? isLoading,
     String? errorMessage,
     VersePlaybackStatus? playbackStatus,
@@ -62,12 +93,19 @@ class PlayerState extends Equatable {
     Duration? position,
     Duration? duration,
     Duration? bufferedPosition,
+    bool clearSelectedVerse = false,
+    bool clearCurrentQueueIndex = false,
     bool clearErrorMessage = false,
     bool clearPlaybackError = false,
   }) {
     return PlayerState(
       verses: verses ?? this.verses,
-      selectedVerse: selectedVerse ?? this.selectedVerse,
+      queue: queue ?? this.queue,
+      selectedVerse:
+          clearSelectedVerse ? null : selectedVerse ?? this.selectedVerse,
+      currentQueueIndex: clearCurrentQueueIndex
+          ? null
+          : currentQueueIndex ?? this.currentQueueIndex,
       isLoading: isLoading ?? this.isLoading,
       errorMessage:
           clearErrorMessage ? null : errorMessage ?? this.errorMessage,
@@ -83,7 +121,9 @@ class PlayerState extends Equatable {
   @override
   List<Object?> get props => [
         verses,
+        queue,
         selectedVerse,
+        currentQueueIndex,
         isLoading,
         errorMessage,
         playbackStatus,

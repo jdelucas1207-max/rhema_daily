@@ -122,9 +122,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
               ),
               _PlaybackControls(
                 state: state,
+                onPrevious: notifier.previous,
                 onPlay: notifier.play,
                 onPause: notifier.pause,
                 onStop: notifier.stop,
+                onNext: notifier.next,
                 onSeek: notifier.seek,
               ),
             ],
@@ -137,16 +139,20 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
 
 class _PlaybackControls extends StatelessWidget {
   final PlayerState state;
+  final Future<void> Function() onPrevious;
   final Future<void> Function() onPlay;
   final Future<void> Function() onPause;
   final Future<void> Function() onStop;
+  final Future<void> Function() onNext;
   final Future<void> Function(Duration position) onSeek;
 
   const _PlaybackControls({
     required this.state,
+    required this.onPrevious,
     required this.onPlay,
     required this.onPause,
     required this.onStop,
+    required this.onNext,
     required this.onSeek,
   });
 
@@ -268,6 +274,11 @@ class _PlaybackControls extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   IconButton(
+                    tooltip: 'Previous',
+                    onPressed: state.hasPrevious ? onPrevious : null,
+                    icon: const Icon(Icons.skip_previous),
+                  ),
+                  IconButton(
                     tooltip: state.isCompleted ? 'Replay' : 'Play',
                     onPressed: canPlay ? onPlay : null,
                     icon: Icon(
@@ -283,6 +294,11 @@ class _PlaybackControls extends StatelessWidget {
                     tooltip: 'Stop',
                     onPressed: canStop ? onStop : null,
                     icon: const Icon(Icons.stop),
+                  ),
+                  IconButton(
+                    tooltip: 'Next',
+                    onPressed: state.hasNext ? onNext : null,
+                    icon: const Icon(Icons.skip_next),
                   ),
                 ],
               ),

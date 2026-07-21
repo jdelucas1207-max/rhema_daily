@@ -8,6 +8,10 @@ import 'package:just_audio/just_audio.dart';
 ///
 /// This handler is the single owner of [AudioPlayer]. Presentation code must
 /// communicate with this class rather than with [AudioPlayer] directly.
+///
+/// Riverpod owns the application queue index. This handler mirrors that index
+/// for the operating system media session and forwards system queue-navigation
+/// requests back to the presentation layer.
 class RhemaAudioHandler extends BaseAudioHandler {
   final AudioPlayer _audioPlayer = AudioPlayer(
     handleInterruptions: false,
@@ -15,7 +19,12 @@ class RhemaAudioHandler extends BaseAudioHandler {
 
   final List<StreamSubscription<dynamic>> _subscriptions = [];
 
+  final StreamController<int> _queueNavigationController =
+      StreamController<int>.broadcast();
+
   late final Future<void> _audioSessionInitialization;
+
+  int? _currentQueueIndex;
 
   bool _resumeAfterInterruption = false;
   bool _isDucked = false;
@@ -41,15 +50,95 @@ class RhemaAudioHandler extends BaseAudioHandler {
       )
       .distinct();
 
+  /// Queue-item indices requested by operating-system media controls.
+  ///
+  /// The presentation notifier owns navigation and source preparation.
+  Stream<int> get queueNavigationRequests =>
+      _queueNavigationController.stream;
+
   Duration get position => _audioPlayer.position;
 
   Duration? get duration => _audioPlayer.duration;
 
   Duration get bufferedPosition => _audioPlayer.bufferedPosition;
 
-  /// Publishes the selected verse to the operating system media session.
+  int? get currentQueueIndex => _currentQueueIndex;
+
+  bool get hasPreviousQueueItem {
+    final index = _currentQueueIndex;
+    return index != null && index > 0;
+  }
+
+  bool get hasNextQueueItem {
+    final index = _currentQueueIndex;
+    final items = queue.value;
+
+    return index != null &&
+        index >= 0 &&
+        index < items.length - 1;
+  }
+
+  /// Publishes the full verse queue to the operating-system media session.
   ///
-  /// No artwork or queue information is introduced.
+  /// This does not select or prepare an item unless [initialIndex] is supplied.
+  Future<void> publishQueue(
+    List<MediaItem> items, {
+    int? initialIndex,
+  }) async {
+    final immutableItems = List<MediaItem>.unmodifiable(items);
+
+    queue.add(immutableItems);
+
+    if (immutableItems.isEmpty) {
+      _currentQueueIndex = null;
+      mediaItem.add(null);
+      _broadcastPlaybackState();
+      return;
+    }
+
+    if (initialIndex != null) {
+      await setActiveQueueIndex(initialIndex);
+      return;
+    }
+
+    final currentIndex = _currentQueueIndex;
+
+    if (currentIndex != null &&
+        currentIndex >= 0 &&
+        currentIndex < immutableItems.length) {
+      mediaItem.add(immutableItems[currentIndex]);
+    } else {
+      _currentQueueIndex = null;
+      mediaItem.add(null);
+    }
+
+    _broadcastPlaybackState();
+  }
+
+  /// Sets the active media-session queue item without preparing or playing it.
+  Future<void> setActiveQueueIndex(int index) async {
+    final items = queue.value;
+
+    if (index < 0 || index >= items.length) {
+      throw RangeError.index(
+        index,
+        items,
+        'index',
+        'Queue index is outside the published queue.',
+        items.length,
+      );
+    }
+
+    _currentQueueIndex = index;
+    mediaItem.add(items[index]);
+
+    _broadcastPlaybackState();
+  }
+
+  /// Publishes standalone verse metadata.
+  ///
+  /// This API is retained for compatibility. When the verse exists in the
+  /// published queue, that queue item is activated.
   Future<void> publishVerse({
     required String verseId,
     required String reference,
@@ -65,6 +154,18 @@ class RhemaAudioHandler extends BaseAudioHandler {
       );
     }
 
+    final items = queue.value;
+    final queueIndex = items.indexWhere(
+      (item) => item.id == normalizedId,
+    );
+
+    if (queueIndex >= 0) {
+      await setActiveQueueIndex(queueIndex);
+      return;
+    }
+
+    _currentQueueIndex = null;
+
     mediaItem.add(
       MediaItem(
         id: normalizedId,
@@ -75,6 +176,8 @@ class RhemaAudioHandler extends BaseAudioHandler {
         },
       ),
     );
+
+    _broadcastPlaybackState();
   }
 
   /// Prepares an audio source for playback.
@@ -157,6 +260,58 @@ class RhemaAudioHandler extends BaseAudioHandler {
 
     await _audioPlayer.seek(targetPosition);
     _broadcastPlaybackState();
+  }
+
+  /// Requests navigation to the next queue item.
+  ///
+  /// Riverpod receives the request and performs selection and preparation.
+  @override
+  Future<void> skipToNext() async {
+    final index = _currentQueueIndex;
+
+    if (index == null || !hasNextQueueItem) {
+      return;
+    }
+
+    _emitQueueNavigationRequest(index + 1);
+  }
+
+  /// Requests navigation to the previous queue item.
+  ///
+  /// Queue navigation never wraps.
+  @override
+  Future<void> skipToPrevious() async {
+    final index = _currentQueueIndex;
+
+    if (index == null || !hasPreviousQueueItem) {
+      return;
+    }
+
+    _emitQueueNavigationRequest(index - 1);
+  }
+
+  /// Requests navigation to a specific published queue item.
+  @override
+  Future<void> skipToQueueItem(int index) async {
+    final items = queue.value;
+
+    if (index < 0 || index >= items.length) {
+      return;
+    }
+
+    if (index == _currentQueueIndex) {
+      return;
+    }
+
+    _emitQueueNavigationRequest(index);
+  }
+
+  void _emitQueueNavigationRequest(int index) {
+    if (_disposed || _queueNavigationController.isClosed) {
+      return;
+    }
+
+    _queueNavigationController.add(index);
   }
 
   Future<void> _initializeAudioSession() async {
@@ -272,11 +427,23 @@ class RhemaAudioHandler extends BaseAudioHandler {
       return;
     }
 
-    mediaItem.add(
-      currentItem.copyWith(
-        duration: loadedDuration,
-      ),
+    final updatedItem = currentItem.copyWith(
+      duration: loadedDuration,
     );
+
+    mediaItem.add(updatedItem);
+
+    final index = _currentQueueIndex;
+    final items = queue.value;
+
+    if (index == null || index < 0 || index >= items.length) {
+      return;
+    }
+
+    final updatedQueue = List<MediaItem>.of(items);
+    updatedQueue[index] = updatedItem;
+
+    queue.add(List<MediaItem>.unmodifiable(updatedQueue));
   }
 
   void _broadcastPlaybackState() {
@@ -285,16 +452,43 @@ class RhemaAudioHandler extends BaseAudioHandler {
     }
 
     final isPlaying = _audioPlayer.playing;
+    final controls = <MediaControl>[];
+
+    if (hasPreviousQueueItem) {
+      controls.add(MediaControl.skipToPrevious);
+    }
+
+    controls.add(
+      isPlaying ? MediaControl.pause : MediaControl.play,
+    );
+
+    if (hasNextQueueItem) {
+      controls.add(MediaControl.skipToNext);
+    }
+
+    controls.add(MediaControl.stop);
+
+    final playPauseIndex = controls.indexWhere(
+      (control) =>
+          control == MediaControl.play ||
+          control == MediaControl.pause,
+    );
+
+    final compactActionIndices = <int>[
+      if (hasPreviousQueueItem)
+        controls.indexOf(MediaControl.skipToPrevious),
+      if (playPauseIndex >= 0) playPauseIndex,
+      if (hasNextQueueItem)
+        controls.indexOf(MediaControl.skipToNext),
+    ];
 
     final nextState = PlaybackState(
-      controls: <MediaControl>[
-        if (isPlaying) MediaControl.pause else MediaControl.play,
-        MediaControl.stop,
-      ],
+      controls: controls,
       systemActions: const <MediaAction>{
         MediaAction.seek,
+        MediaAction.skipToQueueItem,
       },
-      androidCompactActionIndices: const <int>[0, 1],
+      androidCompactActionIndices: compactActionIndices,
       processingState: _mapProcessingState(
         _audioPlayer.processingState,
       ),
@@ -302,6 +496,7 @@ class RhemaAudioHandler extends BaseAudioHandler {
       updatePosition: _audioPlayer.position,
       bufferedPosition: _audioPlayer.bufferedPosition,
       speed: _audioPlayer.speed,
+      queueIndex: _currentQueueIndex,
     );
 
     final currentState = playbackState.value;
@@ -339,13 +534,22 @@ class RhemaAudioHandler extends BaseAudioHandler {
         current.updatePosition == next.updatePosition &&
         current.bufferedPosition == next.bufferedPosition &&
         current.speed == next.speed &&
+        current.queueIndex == next.queueIndex &&
         _listEquals(current.controls, next.controls) &&
+        _listEquals(
+          current.androidCompactActionIndices,
+          next.androidCompactActionIndices,
+        ) &&
         _setEquals(current.systemActions, next.systemActions);
   }
 
-  bool _listEquals<T>(List<T> first, List<T> second) {
+  bool _listEquals<T>(List<T>? first, List<T>? second) {
     if (identical(first, second)) {
       return true;
+    }
+
+    if (first == null || second == null) {
+      return false;
     }
 
     if (first.length != second.length) {
@@ -378,6 +582,7 @@ class RhemaAudioHandler extends BaseAudioHandler {
 
     _subscriptions.clear();
 
+    await _queueNavigationController.close();
     await _audioPlayer.dispose();
   }
 }

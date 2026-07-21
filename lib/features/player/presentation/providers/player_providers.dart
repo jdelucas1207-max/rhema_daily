@@ -19,13 +19,19 @@ final playerStateNotifierProvider =
 );
 
 class PlayerStateNotifier extends StateNotifier<PlayerState> {
+  static const String _missingAudioMessage =
+      'No audio is available for this verse yet.';
+
   final GetAllVerses getAllVerses;
   final RhemaAudioHandler audioHandler;
 
   final List<StreamSubscription<dynamic>> _playbackSubscriptions = [];
 
   String? _preparedVerseId;
+  String? _completionHandledVerseId;
+
   bool _subscriptionsInitialized = false;
+  bool _queueNavigationInProgress = false;
 
   PlayerStateNotifier({
     required this.getAllVerses,
@@ -44,68 +50,122 @@ class PlayerStateNotifier extends StateNotifier<PlayerState> {
 
     final result = await getAllVerses(const NoParams());
 
-    _setState(
-      result.fold(
-        (failure) => state.copyWith(
-          isLoading: false,
-          errorMessage: failure.message,
-        ),
-        (verses) => state.copyWith(
-          verses: verses,
-          isLoading: false,
-          clearErrorMessage: true,
-        ),
-      ),
+    await result.fold(
+      (failure) async {
+        try {
+          await audioHandler.publishQueue(const <MediaItem>[]);
+        } catch (_) {
+          // Preserve the original verse-loading failure as the primary error.
+        }
+
+        _preparedVerseId = null;
+        _completionHandledVerseId = null;
+
+        _setState(
+          state.copyWith(
+            verses: const <Verse>[],
+            queue: const <Verse>[],
+            isLoading: false,
+            errorMessage: failure.message,
+            playbackStatus: VersePlaybackStatus.idle,
+            position: Duration.zero,
+            duration: Duration.zero,
+            bufferedPosition: Duration.zero,
+            clearSelectedVerse: true,
+            clearCurrentQueueIndex: true,
+          ),
+        );
+      },
+      (verses) async {
+        final queueItems = verses.map(_mediaItemFromVerse).toList(
+              growable: false,
+            );
+
+        try {
+          await audioHandler.publishQueue(queueItems);
+        } catch (error) {
+          _setState(
+            state.copyWith(
+              verses: verses,
+              queue: verses,
+              isLoading: false,
+              errorMessage:
+                  'Unable to publish the playback queue: $error',
+              clearSelectedVerse: true,
+              clearCurrentQueueIndex: true,
+            ),
+          );
+          return;
+        }
+
+        _preparedVerseId = null;
+        _completionHandledVerseId = null;
+
+        _setState(
+          state.copyWith(
+            verses: verses,
+            queue: verses,
+            isLoading: false,
+            playbackStatus: VersePlaybackStatus.idle,
+            position: Duration.zero,
+            duration: Duration.zero,
+            bufferedPosition: Duration.zero,
+            clearSelectedVerse: true,
+            clearCurrentQueueIndex: true,
+            clearErrorMessage: true,
+            clearPlaybackError: true,
+          ),
+        );
+      },
     );
   }
 
   Future<void> selectVerse(Verse verse) async {
-    try {
-      await audioHandler.stop();
-    } catch (_) {
-      // Selection remains safe even if no audio source is currently loaded.
-    }
-
-    _preparedVerseId = null;
-
-    _setState(
-      state.copyWith(
-        selectedVerse: verse,
-        playbackStatus: VersePlaybackStatus.stopped,
-        position: Duration.zero,
-        duration: Duration.zero,
-        bufferedPosition: Duration.zero,
-        clearPlaybackError: true,
-      ),
+    final queueIndex = state.queue.indexWhere(
+      (queueVerse) => queueVerse.id == verse.id,
     );
 
-    try {
-      await audioHandler.publishVerse(
-        verseId: verse.id,
-        reference: _verseReference(verse),
-        translation: verse.translation,
-      );
-    } catch (error) {
+    if (queueIndex < 0) {
       _setState(
         state.copyWith(
           playbackStatus: VersePlaybackStatus.error,
-          playbackError: 'Unable to publish verse metadata: $error',
+          playbackError:
+              'The selected verse is not available in the playback queue.',
         ),
       );
       return;
     }
 
-    if (!_hasAudioPath(verse)) {
-      _setState(
-        state.copyWith(
-          playbackStatus: VersePlaybackStatus.error,
-          playbackError: 'No audio is available for this verse yet.',
-        ),
-      );
+    await _navigateToQueueIndex(
+      queueIndex,
+      autoplay: false,
+    );
+  }
+
+  Future<void> next() async {
+    final currentIndex = state.currentQueueIndex;
+
+    if (currentIndex == null || !state.hasNext) {
       return;
     }
 
-    await _prepareSelectedVerse();
+    await _navigateToQueueIndex(
+      currentIndex + 1,
+      autoplay: false,
+    );
+  }
+
+  Future<void> previous() async {
+    final currentIndex = state.currentQueueIndex;
+
+    if (currentIndex == null || !state.hasPrevious) {
+      return;
+    }
+
+    await _navigateToQueueIndex(
+      currentIndex - 1,
+      autoplay: false,
+    );
   }
 
   Future<void> play() async {
@@ -125,7 +185,7 @@ class PlayerStateNotifier extends StateNotifier<PlayerState> {
       _setState(
         state.copyWith(
           playbackStatus: VersePlaybackStatus.error,
-          playbackError: 'No audio is available for this verse yet.',
+          playbackError: _missingAudioMessage,
         ),
       );
       return;
@@ -146,6 +206,7 @@ class PlayerStateNotifier extends StateNotifier<PlayerState> {
         await audioHandler.seek(Duration.zero);
       }
 
+      _completionHandledVerseId = null;
       unawaited(audioHandler.play());
     } catch (error) {
       _setState(
@@ -177,7 +238,21 @@ class PlayerStateNotifier extends StateNotifier<PlayerState> {
   Future<void> stop() async {
     try {
       await audioHandler.stop();
+
       _preparedVerseId = null;
+      _completionHandledVerseId = null;
+
+      _setState(
+        state.copyWith(
+          playbackStatus: state.selectedVerse == null
+              ? VersePlaybackStatus.idle
+              : VersePlaybackStatus.stopped,
+          position: Duration.zero,
+          duration: Duration.zero,
+          bufferedPosition: Duration.zero,
+          clearPlaybackError: true,
+        ),
+      );
     } catch (error) {
       _setState(
         state.copyWith(
@@ -216,6 +291,83 @@ class PlayerStateNotifier extends StateNotifier<PlayerState> {
     }
   }
 
+  Future<void> _navigateToQueueIndex(
+    int queueIndex, {
+    required bool autoplay,
+  }) async {
+    if (_queueNavigationInProgress) {
+      return;
+    }
+
+    if (queueIndex < 0 || queueIndex >= state.queue.length) {
+      return;
+    }
+
+    _queueNavigationInProgress = true;
+
+    try {
+      final verse = state.queue[queueIndex];
+
+      try {
+        await audioHandler.stop();
+      } catch (_) {
+        // Navigation remains safe if no audio source is loaded.
+      }
+
+      _preparedVerseId = null;
+      _completionHandledVerseId = null;
+
+      try {
+        await audioHandler.setActiveQueueIndex(queueIndex);
+      } catch (error) {
+        _setState(
+          state.copyWith(
+            playbackStatus: VersePlaybackStatus.error,
+            playbackError:
+                'Unable to activate the selected queue item: $error',
+          ),
+        );
+        return;
+      }
+
+      _setState(
+        state.copyWith(
+          selectedVerse: verse,
+          currentQueueIndex: queueIndex,
+          playbackStatus: VersePlaybackStatus.stopped,
+          position: Duration.zero,
+          duration: Duration.zero,
+          bufferedPosition: Duration.zero,
+          clearPlaybackError: true,
+        ),
+      );
+
+      if (!_hasAudioPath(verse)) {
+        _setState(
+          state.copyWith(
+            playbackStatus: VersePlaybackStatus.error,
+            playbackError: _missingAudioMessage,
+            position: Duration.zero,
+            duration: Duration.zero,
+            bufferedPosition: Duration.zero,
+          ),
+        );
+        return;
+      }
+
+      final prepared = await _prepareSelectedVerse();
+
+      if (!prepared || !autoplay) {
+        return;
+      }
+
+      _completionHandledVerseId = null;
+      unawaited(audioHandler.play());
+    } finally {
+      _queueNavigationInProgress = false;
+    }
+  }
+
   Future<bool> _prepareSelectedVerse() async {
     final selectedVerse = state.selectedVerse;
     final audioPath = selectedVerse?.audioPath?.trim();
@@ -224,7 +376,7 @@ class PlayerStateNotifier extends StateNotifier<PlayerState> {
       _setState(
         state.copyWith(
           playbackStatus: VersePlaybackStatus.error,
-          playbackError: 'No audio is available for this verse yet.',
+          playbackError: _missingAudioMessage,
           position: Duration.zero,
           duration: Duration.zero,
           bufferedPosition: Duration.zero,
@@ -321,6 +473,13 @@ class PlayerStateNotifier extends StateNotifier<PlayerState> {
         onError: _handlePlaybackStreamError,
       ),
     );
+
+    _playbackSubscriptions.add(
+      audioHandler.queueNavigationRequests.listen(
+        _handleSystemQueueNavigationRequest,
+        onError: _handlePlaybackStreamError,
+      ),
+    );
   }
 
   void _handlePlaybackStateChanged(PlaybackState playbackState) {
@@ -328,6 +487,7 @@ class PlayerStateNotifier extends StateNotifier<PlayerState> {
       return;
     }
 
+    final previousStatus = state.playbackStatus;
     final status = _statusFromPlaybackState(playbackState);
 
     final shouldResetProgress =
@@ -351,6 +511,52 @@ class PlayerStateNotifier extends StateNotifier<PlayerState> {
         clearPlaybackError:
             status != VersePlaybackStatus.error,
       ),
+    );
+
+    if (completed &&
+        previousStatus != VersePlaybackStatus.completed) {
+      unawaited(_handleCompletionDrivenAdvance());
+    }
+  }
+
+  Future<void> _handleCompletionDrivenAdvance() async {
+    if (!mounted || _queueNavigationInProgress) {
+      return;
+    }
+
+    final selectedVerse = state.selectedVerse;
+    final currentIndex = state.currentQueueIndex;
+
+    if (selectedVerse == null || currentIndex == null) {
+      return;
+    }
+
+    if (_completionHandledVerseId == selectedVerse.id) {
+      return;
+    }
+
+    _completionHandledVerseId = selectedVerse.id;
+
+    if (!state.hasNext) {
+      return;
+    }
+
+    await _navigateToQueueIndex(
+      currentIndex + 1,
+      autoplay: true,
+    );
+  }
+
+  Future<void> _handleSystemQueueNavigationRequest(
+    int queueIndex,
+  ) async {
+    if (!mounted) {
+      return;
+    }
+
+    await _navigateToQueueIndex(
+      queueIndex,
+      autoplay: false,
     );
   }
 
@@ -472,6 +678,18 @@ class PlayerStateNotifier extends StateNotifier<PlayerState> {
     }
 
     state = nextState;
+  }
+
+  MediaItem _mediaItemFromVerse(Verse verse) {
+    return MediaItem(
+      id: verse.id,
+      title: _verseReference(verse),
+      album: verse.translation,
+      extras: <String, dynamic>{
+        'translation': verse.translation,
+        'audioPath': verse.audioPath ?? '',
+      },
+    );
   }
 
   String _verseReference(Verse verse) {

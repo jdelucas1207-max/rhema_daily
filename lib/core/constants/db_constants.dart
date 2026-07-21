@@ -9,6 +9,8 @@ class DbConstants {
   static const int databaseVersion = 1;
 
   static const String versesTable = 'verses';
+  static const String playlistsTable = 'playlists';
+  static const String playlistVersesTable = 'playlist_verses';
 
   static const String columnId = 'id';
   static const String columnBook = 'book';
@@ -19,4 +21,9 @@ class DbConstants {
   static const String columnAudioPath = 'audio_path';
   static const String columnDurationInSeconds = 'duration_in_seconds';
   static const String columnCreatedAt = 'created_at';
+  static const String columnName = 'name';
+  static const String columnUpdatedAt = 'updated_at';
+  static const String columnPlaylistId = 'playlist_id';
+  static const String columnVerseId = 'verse_id';
+  static const String columnSortOrder = 'sort_order';
 }
