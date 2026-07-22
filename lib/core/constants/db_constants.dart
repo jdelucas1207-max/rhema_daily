@@ -6,7 +6,7 @@ class DbConstants {
   DbConstants._();
 
   static const String databaseName = 'rhema_daily.db';
-  static const int databaseVersion = 1;
+  static const int databaseVersion = 2;
 
   static const String versesTable = 'verses';
   static const String playlistsTable = 'playlists';
@@ -22,6 +22,7 @@ class DbConstants {
   static const String columnDurationInSeconds = 'duration_in_seconds';
   static const String columnCreatedAt = 'created_at';
   static const String columnName = 'name';
+  static const String columnNormalizedName = 'normalized_name';
   static const String columnUpdatedAt = 'updated_at';
   static const String columnPlaylistId = 'playlist_id';
   static const String columnVerseId = 'verse_id';
